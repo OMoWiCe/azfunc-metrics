@@ -68,6 +68,9 @@ def calculate_turnover_time(location_id):
             time_diff = (last_seen - first_seen).total_seconds()
             time_diffs.append(time_diff)
 
+        # remove 0 values from time_diffs
+        time_diffs = [diff for diff in time_diffs if diff > 0]
+
         if time_diffs:
             time_diffs.sort()
             median_time_diff = int(pd.Series(time_diffs).median())
@@ -100,6 +103,7 @@ omowice_metrics_blueprint = func.Blueprint()
         
 def process_metrics(azeventhub: func.EventHubEvent):
     # Parse the incoming event (IoT Hub telemetry data)
+    logging.info("--------------------------- Processing IoT Hub message ---------------------------")
     message_body = azeventhub.get_body().decode('utf-8') 
     logging.info(f"Received message: {message_body}")
     try:
@@ -195,7 +199,7 @@ def process_metrics(azeventhub: func.EventHubEvent):
     else:
         turnover_time = 0   
     # Step 6: Estimate live count
-    live_count = estimate_live_count(wifi_occupancy_list, cellular_occupancy_list, avg_devices_per_person, avg_sims_per_person,   wifi_usage_ratio, cellular_usage_ratio)    
+    live_count = estimate_live_count(wifi_occupancy_list, cellular_occupancy_list, avg_devices_per_person, avg_sims_per_person, wifi_usage_ratio, cellular_usage_ratio)    
     # Step 7: Update the MAIN_METRICS table
     try:
         connection = pyodbc.connect(SQL_CONNECTION_STRING)
@@ -207,7 +211,7 @@ def process_metrics(azeventhub: func.EventHubEvent):
                 BEGIN
                     UPDATE MAIN_METRICS
                     SET LIVE_COUNT = ?,
-                        TURNOVER_TIME = ?
+                        TURNOVER_TIME = ?,
                         CREATED_AT = ?
                     WHERE LOCATION_ID = ? AND [DATE] = CAST(? AS DATETIME);
                 END
