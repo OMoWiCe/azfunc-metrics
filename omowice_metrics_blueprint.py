@@ -4,10 +4,11 @@ import pyodbc
 from datetime import datetime
 import pandas as pd
 import math
+import os
 import azure.functions as func
 
 # Configuration: Set up environment variables for SQL connection
-SQL_CONNECTION_STRING = "Driver={ODBC Driver 17 for SQL Server};Server=tcp:omowice.database.windows.net,1433;Database=OMoWiCe_DB;Uid=omowice_azure_dbadmin;Pwd=u1PdU9t7nvY9;Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
+SQL_CONNECTION_STRING = os.getenv("DATABASE_CONNECTION_STRING")
 
 # Function to retrieve parameters from the LOCATION_PARAMETERS table
 def get_location_parameters(location_id):
@@ -224,10 +225,16 @@ def process_metrics(azeventhub: func.EventHubEvent):
         else:
             # Get the last turnover time (order it by) from the MAIN_METRICS table and keep it unchanged
             cursor.execute("""
-                    SELECT TOP 1 TURNOVER_TIME FROM MAIN_METRICS WHERE LOCATION_ID = ? ORDER BY CREATED_AT DESC
+                    SELECT TOP 1 TURNOVER_TIME, [DATE] FROM MAIN_METRICS WHERE LOCATION_ID = ? ORDER BY CREATED_AT DESC
                 """, location_id)
             result = cursor.fetchone()
             last_turnover_time = result[0] if result else 0
+            last_update_time = result[1] if result else None
+            # Update last_turnover_time to 0 if the last_update_time is older than 60 minutes
+            if last_update_time and (datetime.now() - last_update_time).total_seconds() > 3600:
+                last_turnover_time = 0
+                logging.info(f"Last metrics update was older than 60 minutes. Setting turnover time to 0 for location: {location_id}")
+
             cursor.execute("""
                 IF EXISTS (SELECT 1 FROM MAIN_METRICS WHERE LOCATION_ID = ? AND [DATE] = CAST(? AS DATETIME))
                 BEGIN
@@ -244,7 +251,7 @@ def process_metrics(azeventhub: func.EventHubEvent):
             """, (location_id, local_timestamp_formated, live_count, local_timestamp, location_id, local_timestamp_formated, location_id, local_timestamp_formated, live_count, last_turnover_time, local_timestamp))
 
         connection.commit()
-        logging.info(f"Metrics updated for location: {location_id}")
+        logging.info(f"Metrics updated in the db for location: {location_id}")
     except Exception as e:
         logging.error(f"Error updating database: {e}")
         connection.rollback()
