@@ -27,11 +27,11 @@ def get_location_parameters(location_id):
             avg_devices_per_person, avg_sims_per_person, wifi_usage_ratio, cellular_usage_ratio, update_interval = result
             return avg_devices_per_person, avg_sims_per_person, wifi_usage_ratio, cellular_usage_ratio, update_interval
         else:
-            logging.error(f"No parameters found for location: {location_id}")
+            logging.error(f"[OMOWICE-METRICS] No parameters found for location: {location_id}")
             return None
 
     except Exception as e:
-        logging.error(f"Error retrieving location parameters: {e}")
+        logging.error(f"[OMOWICE-METRICS] Error retrieving location parameters: {e}")
         return None
     finally:
         cursor.close()
@@ -42,7 +42,7 @@ def estimate_live_count(wifi_list, cellular_list, avg_devices_per_person, avg_si
     estimated_people_from_wifi = (len(wifi_list) / avg_devices_per_person) * wifi_usage_ratio
     estimated_people_from_cell = (len(cellular_list) / avg_sims_per_person) * cellular_usage_ratio
     estimated_live_occupancy = math.ceil(estimated_people_from_wifi + estimated_people_from_cell)
-    logging.info(f"Estimated people from Wi-Fi: {estimated_people_from_wifi}, Estimated people from Cellular: {estimated_people_from_cell}, Estimated Count: {estimated_live_occupancy}")
+    logging.info(f"[OMOWICE-METRICS] Estimated people from Wi-Fi: {estimated_people_from_wifi}, Estimated people from Cellular: {estimated_people_from_cell}, Estimated Count: {estimated_live_occupancy}")
     return estimated_live_occupancy
 
 # Function to calculate turnover time based on ACTIVE_DEVICES and PENDING_DEACTIVATIONS
@@ -84,18 +84,18 @@ def calculate_turnover_time(location_id):
         """, location_id)
 
         connection.commit()
-        logging.info(f"Turnover time calculated for location {location_id}: {median_time_diff} seconds")
+        logging.info(f"[OMOWICE-METRICS] Turnover time calculated for location {location_id}: {median_time_diff} seconds")
         return median_time_diff  # Return the turnover time in seconds
 
     except Exception as e:
-        logging.error(f"Error calculating turnover time: {e}")
+        logging.error(f"[OMOWICE-METRICS] Error calculating turnover time: {e}")
         return 0
 
     finally:
         cursor.close()
         connection.close()
 
-# Main function triggered by IoT Hub (Event Hub)
+########################### Main function triggered by IoT Hub (Event Hub) ###########################
 omowice_metrics_blueprint = func.Blueprint()
 @omowice_metrics_blueprint.event_hub_message_trigger(
         arg_name="azeventhub", 
@@ -104,14 +104,14 @@ omowice_metrics_blueprint = func.Blueprint()
         
 def process_metrics(azeventhub: func.EventHubEvent):
     # Parse the incoming event (IoT Hub telemetry data)
-    logging.info("--------------------------- Processing IoT Hub message ---------------------------")
+    logging.info("[OMOWICE-METRICS] --------------------------- Processing IoT Hub message ---------------------------")
     message_body = azeventhub.get_body().decode('utf-8') 
-    logging.info(f"Received message: {message_body}")
+    logging.info(f"[OMOWICE-METRICS] Received message: {message_body}")
     try:
         # Convert the message body to a dictionary
         message_body = json.loads(message_body)
     except json.JSONDecodeError as e:
-        logging.error(f"Failed to parse message body as JSON: {e}")
+        logging.error(f"[OMOWICE-METRICS] Failed to parse message body as JSON: {e}")
         return  # Exit the function if parsing fails
 
     # Extract necessary data from the message
@@ -122,10 +122,11 @@ def process_metrics(azeventhub: func.EventHubEvent):
     # Retrieve parameters from the LOCATION_PARAMETERS table
     params = get_location_parameters(location_id)
     if not params:
-        logging.error(f"Failed to retrieve parameters for location: {location_id}. Using default values.")
+        # Setting default values if parameters are not found
+        logging.error(f"[OMOWICE-METRICS] Failed to retrieve parameters for location: {location_id}. Using default values.")
         avg_devices_per_person, avg_sims_per_person, wifi_usage_ratio, cellular_usage_ratio, update_interval = 1.5, 2, 0.25, 0.75, 1
     else:
-        logging.info(f"Parameters retrieved for location: {location_id}")
+        logging.info(f"[OMOWICE-METRICS] Parameters retrieved for location: {location_id}")
         avg_devices_per_person, avg_sims_per_person, wifi_usage_ratio, cellular_usage_ratio, update_interval = params   
     try:
         # Connect to SQL database
@@ -138,7 +139,7 @@ def process_metrics(azeventhub: func.EventHubEvent):
             SET missed_count = missed_count + 1
             WHERE location_id = ?
         """, location_id)   
-        logging.info(f"Missed count updated for all the devices in location: {location_id}") 
+        logging.info(f"[OMOWICE-METRICS] Missed count updated for all the devices in location: {location_id}") 
 
         # Step 2: Add unique devices to ACTIVE_DEVICES table and reset missed_count to 0 if they are present in the current occupancy list
         # Process Wi-Fi devices
@@ -157,7 +158,7 @@ def process_metrics(azeventhub: func.EventHubEvent):
                         WHERE location_id = ? AND device_id = ?
                     END
                 """, (location_id, device, location_id, device, local_timestamp, local_timestamp, local_timestamp, location_id, device))    
-        logging.info(f"Wi-Fi devices processed for location: {location_id}")
+        logging.info(f"[OMOWICE-METRICS] Wi-Fi devices processed for location: {location_id}")
         # Process Cellular devices
         if cellular_occupancy_list:
             for device in cellular_occupancy_list:
@@ -174,7 +175,7 @@ def process_metrics(azeventhub: func.EventHubEvent):
                         WHERE location_id = ? AND device_id = ?
                     END
                 """, (location_id, device, location_id, device,  local_timestamp, local_timestamp, local_timestamp, location_id, device))   
-        logging.info(f"Cellular devices processed for location: {location_id}")
+        logging.info(f"[OMOWICE-METRICS] Cellular devices processed for location: {location_id}")
         # Step 3: Move devices to PENDING_DEACTIVATIONS if missed_count > threshold (e.g., 5)
         cursor.execute("""
             INSERT INTO PENDING_DEACTIVATIONS (location_id, device_id, first_seen, last_seen, missed_count)
@@ -187,9 +188,9 @@ def process_metrics(azeventhub: func.EventHubEvent):
             DELETE FROM ACTIVE_DEVICES WHERE location_id = ? AND missed_count > 5
         """, location_id)   
         connection.commit()
-        logging.info(f"Devices processed for location: {location_id}")  
+        logging.info(f"[OMOWICE-METRICS] Devices processed for location: {location_id}")  
     except Exception as e:
-        logging.error(f"Error processing devices: {e}")
+        logging.error(f"[OMOWICE-METRICS] Error processing devices: {e}")
         connection.rollback()
     finally:
         cursor.close()
@@ -206,6 +207,7 @@ def process_metrics(azeventhub: func.EventHubEvent):
         connection = pyodbc.connect(SQL_CONNECTION_STRING)
         cursor = connection.cursor() 
         local_timestamp_formated = datetime.strptime(local_timestamp, '%Y-%m-%dT%H:%M:%S.%f').strftime('%Y-%m-%d %H:%M') 
+        # Update the MAIN_METRICS table with the new metrics
         if turnover_time != 0:
             cursor.execute("""
                 IF EXISTS (SELECT 1 FROM MAIN_METRICS WHERE LOCATION_ID = ? AND [DATE] = CAST(? AS DATETIME))
@@ -233,8 +235,15 @@ def process_metrics(azeventhub: func.EventHubEvent):
             # Update last_turnover_time to 0 if the last_update_time is older than 60 minutes
             if last_update_time and (datetime.now() - last_update_time).total_seconds() > 3600:
                 last_turnover_time = 0
-                logging.info(f"Last metrics update was older than 60 minutes. Setting turnover time to 0 for location: {location_id}")
-
+                # also remove all the devices if the last_update_time is too old
+                cursor.execute("""
+                    DELETE FROM PENDING_DEACTIVATIONS WHERE location_id = ?
+                """, location_id)
+                cursor.execute("""
+                    DELETE FROM ACTIVE_DEVICES WHERE location_id = ?
+                """, location_id)
+                logging.info(f"[OMOWICE-METRICS] Last metrics update was older than 60 minutes. Setting turnover time to 0 for location: {location_id} and removing all the devices.")
+            # Update the MAIN_METRICS table with the new metrics and old turnover time
             cursor.execute("""
                 IF EXISTS (SELECT 1 FROM MAIN_METRICS WHERE LOCATION_ID = ? AND [DATE] = CAST(? AS DATETIME))
                 BEGIN
@@ -251,9 +260,9 @@ def process_metrics(azeventhub: func.EventHubEvent):
             """, (location_id, local_timestamp_formated, live_count, local_timestamp, location_id, local_timestamp_formated, location_id, local_timestamp_formated, live_count, last_turnover_time, local_timestamp))
 
         connection.commit()
-        logging.info(f"Metrics updated in the db for location: {location_id}")
+        logging.info(f"[OMOWICE-METRICS] Metrics updated in the db for location: {location_id}")
     except Exception as e:
-        logging.error(f"Error updating database: {e}")
+        logging.error(f"[OMOWICE-METRICS] Error updating database: {e}")
         connection.rollback()
     finally:
         cursor.close()
