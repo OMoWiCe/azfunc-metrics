@@ -5,6 +5,7 @@ from datetime import datetime
 import pandas as pd
 import math
 import os
+import time
 import azure.functions as func
 
 # Configuration: Set up environment variables for SQL connection
@@ -12,38 +13,90 @@ SQL_CONNECTION_STRING = os.getenv("DATABASE_CONNECTION_STRING")
 
 # Function to retrieve parameters from the LOCATION_PARAMETERS table
 def get_location_parameters(location_id):
-    try:
-        # Connect to SQL database
-        connection = pyodbc.connect(SQL_CONNECTION_STRING)
-        cursor = connection.cursor()
+    max_retries = 5  # Maximum number of retries
+    retry_delay = 5  # Delay between retries in seconds
+    retries = 0
 
-        cursor.execute("""
-            SELECT AVG_DEVICES_PER_PERSON, AVG_SIMS_PER_PERSON, WIFI_USAGE_RATIO, CELLULAR_USAGE_RATIO, UPDATE_INTERVAL 
-            FROM LOCATION_PARAMETERS WHERE LOCATION_ID = ?
-        """, location_id)
+    while retries < max_retries:
+        try:
+            # Connect to SQL database
+            connection = pyodbc.connect(SQL_CONNECTION_STRING, timeout=10)  # Set timeout to 10 seconds
+            cursor = connection.cursor()
 
-        result = cursor.fetchone()
-        if result:
-            avg_devices_per_person, avg_sims_per_person, wifi_usage_ratio, cellular_usage_ratio, update_interval = result
-            return avg_devices_per_person, avg_sims_per_person, wifi_usage_ratio, cellular_usage_ratio, update_interval
-        else:
-            logging.error(f"[OMOWICE-METRICS] No parameters found for location: {location_id}")
+            cursor.execute("""
+                SELECT AVG_DEVICES_PER_PERSON, AVG_SIMS_PER_PERSON, WIFI_USAGE_RATIO, CELLULAR_USAGE_RATIO, UPDATE_INTERVAL 
+                FROM LOCATION_PARAMETERS WHERE LOCATION_ID = ?
+            """, location_id)
+
+            result = cursor.fetchone()
+            if result:
+                avg_devices_per_person, avg_sims_per_person, wifi_usage_ratio, cellular_usage_ratio, update_interval = result
+                return avg_devices_per_person, avg_sims_per_person, wifi_usage_ratio, cellular_usage_ratio, update_interval
+            else:
+                logging.error(f"[OMOWICE-METRICS] No parameters found for location: {location_id}")
+                return None
+
+        except pyodbc.OperationalError as e:
+            retries += 1
+            logging.warning(f"[OMOWICE-METRICS] SQL connection timeout. Retrying {retries}/{max_retries}...")
+            if retries >= max_retries:
+                logging.error(f"[OMOWICE-METRICS] Maximum retries reached. Unable to connect to the database.")
+                return None
+            time.sleep(retry_delay)  # Wait before retrying
+
+        except Exception as e:
+            logging.error(f"[OMOWICE-METRICS] Error retrieving location parameters: {e}")
             return None
 
-    except Exception as e:
-        logging.error(f"[OMOWICE-METRICS] Error retrieving location parameters: {e}")
-        return None
-    finally:
-        cursor.close()
-        connection.close()
+        finally:
+            try:
+                cursor.close()
+                connection.close()
+            except:
+                pass
 
 # Function to estimate live count based on the IoT data
 def estimate_live_count(wifi_list, cellular_list, avg_devices_per_person, avg_sims_per_person, wifi_usage_ratio, cellular_usage_ratio):
-    estimated_people_from_wifi = (len(wifi_list) / avg_devices_per_person) * wifi_usage_ratio
-    estimated_people_from_cell = (len(cellular_list) / avg_sims_per_person) * cellular_usage_ratio
-    estimated_live_occupancy = math.ceil(estimated_people_from_wifi + estimated_people_from_cell)
-    logging.info(f"[OMOWICE-METRICS] Estimated people from Wi-Fi: {estimated_people_from_wifi}, Estimated people from Cellular: {estimated_people_from_cell}, Estimated Count: {estimated_live_occupancy}")
-    return estimated_live_occupancy
+    wifi_count = len(wifi_list)
+    cellular_count = len(cellular_list)
+
+    # Estimates from both sources
+    est_wifi = wifi_count if wifi_count < 7 else (wifi_count / avg_devices_per_person) * (1+ wifi_usage_ratio)
+    est_cell = cellular_count * cellular_usage_ratio if cellular_count < 7 else (cellular_count / avg_sims_per_person) * (1 + cellular_usage_ratio)
+
+    # Apply a confidence multiplier to est_wifi
+    wifi_confidence_multiplier = 1 + (0.01 * wifi_count)  # Boost WiFi estimate based on count
+    est_wifi *= wifi_confidence_multiplier
+
+    # Apply weighting factors to estimates due to wifi more accurate than cellular
+    wifi_weight = 0.9
+    cellular_weight = 0.8
+
+    # Combined estimate with adjusted weights
+    combined_estimate = (est_wifi * wifi_weight) + (est_cell * cellular_weight)
+
+    # Apply overlap adjustment (assume 10% overlap)
+    overlap_adjustment = 0.9
+    final_estimate = math.ceil(combined_estimate * overlap_adjustment)
+
+    # Confidence calculation (improved accuracy)
+    min_threshold = 1.0  # Prevents division blow-up on small sums
+    total_estimates = est_wifi + est_cell
+    adjusted_avg = max(total_estimates / 2, min_threshold)
+    relative_diff = abs(est_wifi - est_cell) / adjusted_avg if total_estimates > 0 else 0  # 
+    confidence = max(0, round((1 - relative_diff), 2))
+
+    # Adjust confidence for WiFi presence (more reliable source)
+    if wifi_count > 0:
+        wifi_bias = 0.2 * math.log(wifi_count + 2)  # Logarithmic adjustment for diminishing returns
+        confidence = min(round(confidence + wifi_bias, 2), 1.0)
+
+    logging.info(
+        f"[OMOWICE-METRICS] WiFi: {wifi_count}, Cellular: {cellular_count}, "
+        f"Estimates => WiFi: {est_wifi:.2f}, Cellular: {est_cell:.2f}, Final: {final_estimate}, Confidence: {confidence}"
+    )
+
+    return final_estimate
 
 # Function to calculate turnover time based on ACTIVE_DEVICES and PENDING_DEACTIVATIONS
 def calculate_turnover_time(location_id):
